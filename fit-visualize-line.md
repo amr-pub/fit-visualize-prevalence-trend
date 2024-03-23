@@ -50,13 +50,11 @@ pathogen_lms <-
     # Create nested object with name "by_pathogen".
     nest(.key = "by_pathogen") %>% 
     # Do the regression on each nested object.
-    mutate(lm = map(by_pathogen, do_lm)) %>%
+    mutate(lm     = map(by_pathogen, do_lm)) %>%
     # Get the regression statistics.
-    mutate(tidy = map(lm,
-                      broom::tidy)) %>% 
+    mutate(tidy   = map(lm, broom::tidy)) %>% 
     # Get more regression statistics.
-    mutate(glance = map(lm,
-                      broom::glance)) %>% 
+    mutate(glance = map(lm, broom::glance)) %>% 
     # Unnest, generating unique column names.
     unnest(c(tidy, glance), names_repair = "unique")
     
