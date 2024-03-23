@@ -1,0 +1,155 @@
+---
+title: "Calculate and plot a line of best fit"
+author: "Brennan Chapman"
+format: 
+  html:
+    code-fold:    TRUE
+    code-tools:   TRUE
+---
+
+This script calculates and plots a line of best fit for a data set in long format,
+consisting of pathogen prevalence by year.
+
+```{r message=FALSE}
+#| code-summary: Setup
+
+## CHUNK: Setup
+
+usePackage <- function(p, repo = "https://cran.rstudio.com/") {
+  if (!is.element(p, installed.packages()[,1])) install.packages(p, dep = TRUE, repos = repo)
+  library(p, character.only = TRUE)
+}
+
+usePackage("tidyverse")     # Common Operations
+usePackage("magrittr")      # Pipes
+usePackage("ggplot2")       # Plots
+usePackage("broom")         # Get Model Components
+usePackage("here")          # Get Paths
+```
+
+```{r message=FALSE}
+#| code-summary: Import data
+
+## CHUNK: Import data
+
+# Set the path to your data.
+# CSV with columns: pathogen, year, prevalence.
+thedata_path <- here::here("example_data.csv")
+
+# Read the data.
+thedata      <- read_csv(file = thedata_path)
+
+# To demonstrate robustness, in the example data, pathogen_2 is missing a data 
+# point (NA) and pathogen_3 has an extra data point.
+
+```
+
+
+## Calculate 
+
+```{r message=FALSE}
+#| code-summary: Calculate a line of best fit for each pathogen
+
+## CHUNK: Calculate a line of best fit for each pathogen
+
+# The linear regression model.
+do_lm <- function(.data) {
+  lm(formula = prevalence ~ year, .data)
+}
+
+# Calculate a linear model for each pathogen.
+pathogen_lms <-
+  thedata %>%
+    group_by(pathogen) %>%
+    # Create nested object with name "by_pathogen".
+    nest(.key = "by_pathogen") %>% 
+    # Do the regression on each nested object.
+    mutate(lm = map(by_pathogen, do_lm)) %>%
+    # Get the regression statistics.
+    mutate(tidy = map(lm,
+                      broom::tidy)) %>% 
+    # Get more regression statistics.
+    mutate(glance = map(lm,
+                      broom::glance)) %>% 
+    # Unnest, generating unique column names.
+    unnest(c(tidy, glance), names_repair = "unique")
+    
+# Print the models.
+pathogen_lms %>%
+  select(pathogen, term, estimate, p.val = p.value...8, r.squared)
+
+```
+
+- The *year* term is the slope of the line of best fit. 
+- *r squared* is a measure of the proportion of variance explained by the model 
+  (i.e., goodness of fit).
+
+
+## Plot
+
+The *null slope* is the slope beyond which a trend is considered to be positive
+or negative.
+
+```{r}
+#| code-summary: Set the null slope
+
+## CHUNK: Set the null bound
+
+null_slope_value <- 0.05
+
+```
+
+
+The null slope is set at +/- `r null_slope_value*100`%.
+
+```{r message = FALSE}
+#| code-summary: Calculate the null bounds for each pathogen
+
+## CHUNK: Calculate the null bounds for each pathogen
+
+# A function to get the prediction from the model.
+predict_from_model <- function(themodel, topredict) {
+  broom::augment(themodel, newdata = tibble(year = topredict))$.fitted
+}
+
+# Get a data frame containing one model per year.
+pathogen_lms_predictor_term <- filter(pathogen_lms, term == "year")
+
+# Calculate the null bounds.
+null_bounds<- 
+  thedata %>%
+    group_by(pathogen) %>%
+    # Get the median year and the number of years from the median to the range. 
+    mutate(mid_year = median(year), 
+           rg       = max(year - mid_year)) %>%
+    # Keep only one row per year; the year does not matter, so take the first.
+    slice_head(n = 1) %>%
+    # Keep only useful columns.
+    select(pathogen, mid_year, rg) %>%
+    # Join with model data frame.
+    left_join(select(pathogen_lms_predictor_term, pathogen, lm)) %>%
+    # Predict at median year.
+    mutate(pred_med_year = map(lm, predict_from_model, mid_year)) %>%
+    # Unnest to remove list structure.
+    unnest(pred_med_year) %>%
+    # Calculate the bounds; the min and max of a line of best fit that is null.
+    mutate(lower_bound = pred_med_year - null_slope_value * rg, 
+           upper_bound = pred_med_year + null_slope_value * rg)
+
+```
+
+```{r message=FALSE}
+#| code-summary: Plot the data, lines of best fit, and the null bounds
+
+## CHUNK:  Plot the data, lines of best fit, and the null bounds
+
+ggplot(data = thedata, aes(x = year, y = prevalence)) + 
+  geom_point() +
+  geom_smooth(method = lm, se  = FALSE) + 
+  geom_hline(data = null_bounds, aes(yintercept = lower_bound)) + 
+  geom_hline(data = null_bounds, aes(yintercept = upper_bound)) + 
+  facet_wrap(facets = vars(pathogen))
+
+```
+
+
