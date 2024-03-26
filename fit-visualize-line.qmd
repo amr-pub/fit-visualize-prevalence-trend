@@ -1,5 +1,5 @@
 ---
-title: "Calculate and plot a line of best fit"
+title: "Calculate and plot a regression line of prevalence over time"
 author: "Brennan Chapman"
 format: 
   html:
@@ -7,8 +7,8 @@ format:
     code-tools:   TRUE
 ---
 
-This script calculates and plots a line of best fit for a data set in long format,
-consisting of pathogen prevalence by year.
+This script calculates and plots a regression line (a line of best fit) for 
+pathogen prevalence over time.
 
 ```{r message=FALSE}
 #| code-summary: Setup
@@ -25,7 +25,10 @@ usePackage("magrittr")      # Pipes
 usePackage("ggplot2")       # Plots
 usePackage("broom")         # Get Model Components
 usePackage("here")          # Get Paths
+
 ```
+
+The supplied data should be in long format, consisting of pathogen prevalence by year.
 
 ```{r message=FALSE}
 #| code-summary: Import data
@@ -33,8 +36,11 @@ usePackage("here")          # Get Paths
 ## CHUNK: Import data
 
 # Set the path to your data.
+# This is an example data set, included with the script.
 # CSV with columns: pathogen, year, prevalence.
+
 thedata_path <- here::here("example_data.csv")
+#thedata_path <- here::here("proj_data.csv")
 
 # Read the data.
 thedata      <- read_csv(file = thedata_path)
@@ -45,109 +51,118 @@ thedata      <- read_csv(file = thedata_path)
 ```
 
 
-## Calculate 
+
+## Calculate
 
 ```{r message=FALSE}
-#| code-summary: Calculate a line of best fit for each pathogen
+#| code-summary: Calculate a regression line for each pathogen
 
-## CHUNK: Calculate a line of best fit for each pathogen
+## CHUNK: Calculate a regression line for each pathogen.
 
-# The linear regression model.
-do_lm <- function(.data) {
+# The regression model.
+do_reg <- function(.data) {
   lm(formula = prevalence ~ year, .data)
 }
 
-# Calculate a linear model for each pathogen.
-pathogen_lms <-
+# Regress for each pathogen.
+pathogen_model_list <-
   thedata %>%
     group_by(pathogen) %>%
-    # Create nested object with name "by_pathogen".
-    nest(.key = "by_pathogen") %>% 
-    # Do the regression on each nested object.
-    mutate(lm     = map(by_pathogen, do_lm)) %>%
-    # Get the regression statistics.
-    mutate(tidy   = map(lm, broom::tidy)) %>% 
-    # Get more regression statistics.
-    mutate(glance = map(lm, broom::glance)) %>% 
-    # Unnest, generating unique column names.
-    unnest(c(tidy, glance), names_repair = "unique")
-    
+    # Create nested object with data set.
+    nest(.key = "observations") %>% 
+    mutate(
+      # Run the regression.
+      regmodel = map(observations, do_reg), 
+      # Get the regression coefficient for year; the slope of the regression line.
+      slope    = regmodel[[1]]$coefficients['year'], 
+      # Get the p-value of the regression coefficient.
+      pval         = summary(regmodel[[1]])$coefficients['year', 'Pr(>|t|)'], 
+      glance       = map(regmodel, broom::glance)) %>%
+    unnest(glance)
+  
 # Print the models.
-pathogen_lms %>%
-  select(pathogen, term, estimate, p.val = p.value...8, r.squared)
+pathogen_model_list %>%
+  arrange(pathogen) %>%
+  select(c(pathogen, slope, pval, r.squared, adj.r.squared))
 
 ```
 
-- The *year* term is the slope of the line of best fit. 
-- *r squared* is a measure of the proportion of variance explained by the model 
-  (i.e., goodness of fit).
 
+
+### Interpretation
+
+- The coefficient for the model's year term (the *slope*) is the average one-year
+  rate of change in the pathogen prevalence. 
+- The p-value (*pval*) is the significance of the model's year term (via 
+  [t-test](https://en.wikipedia.org/wiki/T-statistic)). 
+- The R-squared (*r.squared*) is the model's 
+  [coefficient of determination](https://en.wikipedia.org/wiki/Coefficient_of_determination),
+  which is a measurement of the proportion of variance explained by the model 
+  (i.e., goodness of fit).
+- The adjusted R-squared (*adj.r.squared*) is the model's coefficient of 
+  determination, normalized by the number of model terms.
+
+Note: at this time, a lm model is used; a glm(family = binomial(link="logit"))
+model is more appropriate.
 
 ## Plot
 
-The *null slope* is the slope beyond which a trend is considered to be positive
-or negative.
-
-```{r}
-#| code-summary: Set the null slope
-
-## CHUNK: Set the null bound
-
-null_slope_value <- 0.05
-
-```
-
-
-The null slope is set at +/- `r null_slope_value*100`%.
-
 ```{r message = FALSE}
-#| code-summary: Calculate the null bounds for each pathogen
+#| code-summary: Calculate expected value
 
-## CHUNK: Calculate the null bounds for each pathogen
+## CHUNK: Calculate the expected value of the regression line at all included years.
+
+years_to_predict        <- seq(min(thedata$year), max(thedata$year))
+names(years_to_predict) <- years_to_predict
 
 # A function to get the prediction from the model.
 predict_from_model <- function(themodel, topredict) {
-  broom::augment(themodel, newdata = tibble(year = topredict))$.fitted
+  broom::augment(themodel, newdata = tibble(year = topredict))
 }
 
-# Get a data frame containing one model per year.
-pathogen_lms_predictor_term <- filter(pathogen_lms, term == "year")
-
-# Calculate the null bounds.
-null_bounds<- 
-  thedata %>%
+plotted_values <- 
+  pathogen_model_list %>%
+    mutate(pred_val = map(regmodel, predict_from_model, years_to_predict)) %>%
+    unnest(pred_val) %>%
     group_by(pathogen) %>%
-    # Get the median year and the number of years from the median to the range. 
-    mutate(mid_year = median(year), 
-           rg       = max(year - mid_year)) %>%
-    # Keep only one row per year; the year does not matter, so take the first.
-    slice_head(n = 1) %>%
-    # Keep only useful columns.
-    select(pathogen, mid_year, rg) %>%
-    # Join with model data frame.
-    left_join(select(pathogen_lms_predictor_term, pathogen, lm)) %>%
-    # Predict at median year.
-    mutate(pred_med_year = map(lm, predict_from_model, mid_year)) %>%
-    # Unnest to remove list structure.
-    unnest(pred_med_year) %>%
-    # Calculate the bounds; the min and max of a line of best fit that is null.
-    mutate(lower_bound = pred_med_year - null_slope_value * rg, 
-           upper_bound = pred_med_year + null_slope_value * rg)
-
+    arrange(pathogen, year) %>%
+    mutate(delta_year_one = .fitted - first(.fitted), 
+           lower_bound_10 = first(.fitted) * 0.90,
+           lower_bound_05 = first(.fitted) * 0.95,
+           upper_bound_05 = first(.fitted) * 1.05,
+           upper_bound_10 = first(.fitted) * 1.10, 
+           fold_change    = abs(first(.fitted) -(.fitted)) / first(.fitted))
+      
 ```
 
 ```{r message=FALSE}
-#| code-summary: Plot the data, lines of best fit, and the null bounds
+#| code-summary: Plot the data and regression line 
 
-## CHUNK:  Plot the data, lines of best fit, and the null bounds
+## CHUNK:  Plot the data, lines of best fit, and percentage change bounds.
 
-ggplot(data = thedata, aes(x = year, y = prevalence)) + 
-  geom_point() +
-  geom_smooth(method = lm, se  = FALSE) + 
-  geom_hline(data = null_bounds, aes(yintercept = lower_bound)) + 
-  geom_hline(data = null_bounds, aes(yintercept = upper_bound)) + 
-  facet_wrap(facets = vars(pathogen))
+ggplot() +
+  
+  # Plot lower and upper bounds of percent change.
+  geom_line(data = plotted_values, aes(x = year, y = lower_bound_10), linetype = 'dashed') +
+  geom_line(data = plotted_values, aes(x = year, y = lower_bound_05), linetype = 'dotted') +
+  geom_line(data = plotted_values, aes(x = year, y = upper_bound_05), linetype = 'dotted') +
+  geom_line(data = plotted_values, aes(x = year, y = upper_bound_10), linetype = 'dashed') +
+  
+  # Alternative method of generating a line of best fit.
+  #geom_smooth(data = thedata,  aes(x = year, y = prevalence), method = lm, se  = FALSE) +
+  geom_line(data = plotted_values, aes(x = year, y = .fitted), colour = "blue") + 
+  
+  # Plot the raw data.
+  geom_point(data = thedata, aes(x = year, y = prevalence)) +
+
+  # Label the y axis.
+  labs(y = "prevalence") + 
+  
+  # Facet, wrapping label names.
+  facet_wrap(facets = vars(pathogen), scales = "free_y", labeller = labeller(pathogen = label_wrap_gen(20)))
 
 ```
 
+Dotted lines represent a 5% change in/of the prevalence. Dashed lines represent a
+10% change in/of the prevalence.
 
